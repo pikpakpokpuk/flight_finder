@@ -1,0 +1,5 @@
+Flyan
+Flywizz
+requests
+streamlit
+pandas

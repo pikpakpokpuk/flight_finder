@@ -26,7 +26,7 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 COMMERCIAL_TYPES = {"large_airport", "medium_airport"}
 
 
-@dataclass
+@dataclass(frozen=True)
 class Airport:
     iata: str
     name: str
