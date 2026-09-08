@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """
-Flight Finder: multi-airport one-way search
-=============================================
+Flight Finder: interactive multi-airport one-way / round-trip search
+=======================================================================
 
+Asks for your start and destination locations (plain place names),
+finds commercial airports within range of each using OurAirports data,
+lets you pick which ones to consider, then asks for an outbound date
+window, a return date window, and an acceptable length-of-stay range.
 Searches Ryanair (via Flyan) and Wizz Air (via Flywizz) across every
-combination of starting airport -> arrival airport, for every one-way
-flight inside a given date window. Prices are normalized to EUR. Prints
-the top N cheapest options.
+selected origin/destination airport pair, pairs up outbound and return
+flights that fit the stay-length interval, and prints the top N
+cheapest round trips.
 
 SETUP (run these once on your own machine):
     pip install Flyan Flywizz requests
 
 USAGE:
     python flight_finder.py
-
-Everything you'd want to tweak lives in the "SETTINGS" block below.
 """
 
 from __future__ import annotations
 
 import csv
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import product
@@ -27,41 +30,39 @@ from typing import Optional
 
 import requests
 
+# Windows consoles default to a codepage (e.g. cp1252) that can't print
+# airport names with diacritics (Bucharest's "Henri Coandă", "Malmö", ...).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
 from flyan import RyanAir, FlightSearchParams
 from flywizz import WizzAir, TimetableSearch
 
+import airports
 
 # ============================================================================
-# SETTINGS -- edit this block for your own search
+# SETTINGS
 # ============================================================================
 
-# Every airport you could fly out from.
-ORIGIN_AIRPORTS = ["CPH", "MMX"]
+NEARBY_RADIUS_KM = 300
 
-# Every airport you'd be willing to fly into.
-DESTINATION_AIRPORTS = ["OTP", "TGM", "CLJ", "GHV", "BUD"]
-
-# Search window: earliest possible departure to latest possible departure.
-SEARCH_FROM = datetime(2026, 12, 20)
-SEARCH_TO = datetime(2027, 1, 10)
-
-# Drop flights priced above this (EUR) before ranking, just to cut noise.
+# Drop legs priced above this (EUR) before pairing, just to cut noise.
 # Set to None to disable.
-MAX_PRICE_EUR: Optional[float] = 300
+MAX_LEG_PRICE_EUR: Optional[float] = 300
 
-# How many results to print/save at the end.
+# How many round-trip results to print/save at the end.
 TOP_N = 20
 
 OUTPUT_CSV = "flight_options.csv"
 
 
 # ============================================================================
-# Internals -- shouldn't need to touch below this line
+# Flight search
 # ============================================================================
 
 
 @dataclass
-class FlightOption:
+class Leg:
     airline: str
     origin: str
     destination: str
@@ -70,6 +71,20 @@ class FlightOption:
     currency: str
     price_eur: float
     flight_number: str = ""
+
+
+@dataclass
+class RoundTrip:
+    outbound: Leg
+    inbound: Leg
+
+    @property
+    def total_price_eur(self) -> float:
+        return self.outbound.price_eur + self.inbound.price_eur
+
+    @property
+    def stay_days(self) -> int:
+        return (self.inbound.departure.date() - self.outbound.departure.date()).days
 
 
 def get_eur_rates() -> dict:
@@ -92,13 +107,13 @@ def to_eur(amount: float, currency: str, rates: dict) -> float:
     return amount / rate
 
 
-def search_ryanair(origin: str, destination: str, rates: dict) -> list[FlightOption]:
+def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
     client = RyanAir(currency="EUR")
     params = FlightSearchParams(
         from_airport=origin,
         to_airport=destination,
-        from_date=SEARCH_FROM,
-        to_date=SEARCH_TO,
+        from_date=date_from,
+        to_date=date_to,
     )
     try:
         flights = client.get_oneways(params)
@@ -108,7 +123,7 @@ def search_ryanair(origin: str, destination: str, rates: dict) -> list[FlightOpt
 
     out = []
     for f in flights:
-        out.append(FlightOption(
+        out.append(Leg(
             airline="Ryanair",
             origin=origin,
             destination=destination,
@@ -121,13 +136,13 @@ def search_ryanair(origin: str, destination: str, rates: dict) -> list[FlightOpt
     return out
 
 
-def search_wizzair(origin: str, destination: str, rates: dict) -> list[FlightOption]:
+def search_wizzair(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
     client = WizzAir()
     params = TimetableSearch(
         origin=origin,
         destination=destination,
-        date_from=SEARCH_FROM,
-        date_to=SEARCH_TO,
+        date_from=date_from,
+        date_to=date_to,
     )
     try:
         entries = client.get_timetable(params)
@@ -139,7 +154,7 @@ def search_wizzair(origin: str, destination: str, rates: dict) -> list[FlightOpt
     for entry in entries:
         if entry.price is None:
             continue
-        out.append(FlightOption(
+        out.append(Leg(
             airline="Wizz Air",
             origin=origin,
             destination=destination,
@@ -151,54 +166,178 @@ def search_wizzair(origin: str, destination: str, rates: dict) -> list[FlightOpt
     return out
 
 
+def search_legs(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
+    legs = (
+        search_ryanair(origin, destination, date_from, date_to, rates)
+        + search_wizzair(origin, destination, date_from, date_to, rates)
+    )
+    if MAX_LEG_PRICE_EUR is not None:
+        legs = [l for l in legs if l.price_eur <= MAX_LEG_PRICE_EUR]
+    return legs
+
+
+def build_round_trips(outbound_legs: list[Leg], inbound_legs: list[Leg], stay_min: int, stay_max: int) -> list[RoundTrip]:
+    trips = []
+    for out_leg, in_leg in product(outbound_legs, inbound_legs):
+        stay = (in_leg.departure.date() - out_leg.departure.date()).days
+        if stay_min <= stay <= stay_max:
+            trips.append(RoundTrip(outbound=out_leg, inbound=in_leg))
+    return trips
+
+
+# ============================================================================
+# Interactive prompts
+# ============================================================================
+
+
+def prompt_location(label: str) -> tuple[float, float]:
+    while True:
+        place = input(f"{label} (city/address): ").strip()
+        if not place:
+            continue
+        try:
+            lat, lon, display = airports.geocode(place)
+        except Exception as e:
+            print(f"  [error] {e}. Try again.")
+            continue
+        print(f"  -> resolved to {display} ({lat:.3f}, {lon:.3f})")
+        return lat, lon
+
+
+def prompt_airport_selection(label: str, lat: float, lon: float) -> list[str]:
+    found = airports.nearby_airports(lat, lon, NEARBY_RADIUS_KM)
+    if not found:
+        raise SystemExit(f"No commercial airports found within {NEARBY_RADIUS_KM} km of {label}.")
+
+    print(f"\nAirports within {NEARBY_RADIUS_KM} km of {label}:")
+    for i, a in enumerate(found, 1):
+        print(f"  {i:>2}. {a.iata}  {a.name} ({a.municipality}, {a.country}) -- {a.distance_km:.0f} km")
+
+    while True:
+        raw = input("Select airports (comma-separated numbers, or 'all'): ").strip().lower()
+        if raw == "all":
+            return [a.iata for a in found]
+        try:
+            idxs = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            chosen = [found[i - 1].iata for i in idxs]
+        except (ValueError, IndexError):
+            print("  [error] invalid selection, try again.")
+            continue
+        if chosen:
+            return chosen
+        print("  [error] pick at least one.")
+
+
+def prompt_date(label: str) -> datetime:
+    while True:
+        raw = input(f"{label} (YYYY-MM-DD): ").strip()
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            print("  [error] use format YYYY-MM-DD, try again.")
+
+
+def prompt_date_range(label: str) -> tuple[datetime, datetime]:
+    d_from = prompt_date(f"{label} -- earliest date")
+    d_to = prompt_date(f"{label} -- latest date")
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    return d_from, d_to
+
+
+def prompt_stay_range() -> tuple[int, int]:
+    while True:
+        try:
+            lo = int(input("Minimum length of stay (days): ").strip())
+            hi = int(input("Maximum length of stay (days): ").strip())
+        except ValueError:
+            print("  [error] enter whole numbers, try again.")
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+
 def main():
+    start_lat, start_lon = prompt_location("Start location")
+    origin_airports = prompt_airport_selection("start", start_lat, start_lon)
+
+    dest_lat, dest_lon = prompt_location("Destination location")
+    dest_airports = prompt_airport_selection("destination", dest_lat, dest_lon)
+
+    outbound_from, outbound_to = prompt_date_range("Outbound flight window")
+    return_from, return_to = prompt_date_range("Return flight window")
+    stay_min, stay_max = prompt_stay_range()
+
     print(
-        f"Searching {len(ORIGIN_AIRPORTS)} origin(s) x {len(DESTINATION_AIRPORTS)} destination(s) "
-        f"between {SEARCH_FROM:%Y-%m-%d} and {SEARCH_TO:%Y-%m-%d}...\n"
+        f"\nSearching {len(origin_airports)} origin(s) x {len(dest_airports)} destination(s), "
+        f"outbound {outbound_from:%Y-%m-%d}-{outbound_to:%Y-%m-%d}, "
+        f"return {return_from:%Y-%m-%d}-{return_to:%Y-%m-%d}, "
+        f"stay {stay_min}-{stay_max} days...\n"
     )
 
     rates = get_eur_rates()
 
-    all_options: list[FlightOption] = []
-    for origin, destination in product(ORIGIN_AIRPORTS, DESTINATION_AIRPORTS):
-        print(f"Pair: {origin} -> {destination}")
-        all_options += search_ryanair(origin, destination, rates)
-        all_options += search_wizzair(origin, destination, rates)
+    all_trips: list[RoundTrip] = []
+    for origin, destination in product(origin_airports, dest_airports):
+        print(f"Pair: {origin} <-> {destination}")
+        outbound_legs = search_legs(origin, destination, outbound_from, outbound_to, rates)
+        inbound_legs = search_legs(destination, origin, return_from, return_to, rates)
+        all_trips += build_round_trips(outbound_legs, inbound_legs, stay_min, stay_max)
 
-    if MAX_PRICE_EUR is not None:
-        all_options = [o for o in all_options if o.price_eur <= MAX_PRICE_EUR]
-
-    if not all_options:
-        print("\nNo flights found. Try widening the date range, raising MAX_PRICE_EUR, "
-              "or double-check the airport codes.")
+    if not all_trips:
+        print("\nNo round trips found. Try widening the date windows, the stay interval, "
+              "raising MAX_LEG_PRICE_EUR, or picking more airports.")
         return
 
-    all_options.sort(key=lambda o: o.price_eur)
-    top_options = all_options[:TOP_N]
+    all_trips.sort(key=lambda t: t.total_price_eur)
+    top_trips = all_trips[:TOP_N]
 
-    def price_str(o: FlightOption) -> str:
-        extra = f" ({o.price_original:.0f} {o.currency})" if o.currency != "EUR" else ""
-        return f"{o.price_eur:.0f} EUR{extra}"
+    def price_str(leg: Leg) -> str:
+        extra = f" ({leg.price_original:.0f} {leg.currency})" if leg.currency != "EUR" else ""
+        return f"{leg.price_eur:.0f} EUR{extra}"
 
-    print(f"\n{'='*90}\nTOP {TOP_N} CHEAPEST ONE-WAY OPTIONS\n{'='*90}")
-    header = f"{'Route':<10}{'Airline':<10}{'Departure':<20}{'Price':<20}"
+    print(f"\n{'='*100}\nTOP {TOP_N} CHEAPEST ROUND TRIPS\n{'='*100}")
+    header = f"{'Route':<14}{'Out':<18}{'In':<18}{'Stay':<6}{'Airlines':<20}{'Out Price':<18}{'In Price':<18}{'Total':<10}"
     print(header)
-    for o in top_options:
-        route = f"{o.origin}->{o.destination}"
-        dep_str = o.departure.strftime("%Y-%m-%d %H:%M")
-        print(f"{route:<10}{o.airline:<10}{dep_str:<20}{price_str(o):<20}")
+    for t in top_trips:
+        route = f"{t.outbound.origin}<->{t.outbound.destination}"
+        airlines = f"{t.outbound.airline}/{t.inbound.airline}"
+        print(
+            f"{route:<14}"
+            f"{t.outbound.departure:%Y-%m-%d %H:%M}  "
+            f"{t.inbound.departure:%Y-%m-%d %H:%M}  "
+            f"{t.stay_days:<6}"
+            f"{airlines:<20}"
+            f"{price_str(t.outbound):<18}"
+            f"{price_str(t.inbound):<18}"
+            f"{t.total_price_eur:.0f} EUR"
+        )
 
-    # Save everything (not just top N) to CSV for your own filtering/sorting
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["origin", "destination", "airline", "flight_number", "departure_date",
-                          "departure_time", "price_eur", "price_original", "currency"])
-        for o in all_options:
-            writer.writerow([o.origin, o.destination, o.airline, o.flight_number,
-                              o.departure.strftime("%Y-%m-%d"), o.departure.strftime("%H:%M"),
-                              f"{o.price_eur:.2f}", o.price_original, o.currency])
+        writer.writerow([
+            "origin", "destination", "stay_days",
+            "out_airline", "out_flight_number", "out_departure", "out_price_eur", "out_price_original", "out_currency",
+            "in_airline", "in_flight_number", "in_departure", "in_price_eur", "in_price_original", "in_currency",
+            "total_price_eur",
+        ])
+        for t in all_trips:
+            writer.writerow([
+                t.outbound.origin, t.outbound.destination, t.stay_days,
+                t.outbound.airline, t.outbound.flight_number, t.outbound.departure.isoformat(),
+                f"{t.outbound.price_eur:.2f}", t.outbound.price_original, t.outbound.currency,
+                t.inbound.airline, t.inbound.flight_number, t.inbound.departure.isoformat(),
+                f"{t.inbound.price_eur:.2f}", t.inbound.price_original, t.inbound.currency,
+                f"{t.total_price_eur:.2f}",
+            ])
 
-    print(f"\nFull results ({len(all_options)} flights) saved to {OUTPUT_CSV}")
+    print(f"\nFull results ({len(all_trips)} round trips) saved to {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":
