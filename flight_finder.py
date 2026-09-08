@@ -44,7 +44,7 @@ import airports
 # SETTINGS
 # ============================================================================
 
-NEARBY_RADIUS_KM = 300
+NEARBY_RADIUS_KM = 200
 
 # Drop legs priced above this (EUR) before pairing, just to cut noise.
 # Set to None to disable.
@@ -283,12 +283,20 @@ def main():
 
     rates = get_eur_rates()
 
-    all_trips: list[RoundTrip] = []
+    # Search outbound and inbound legs independently across every airport
+    # combo, so an open-jaw trip (e.g. fly into OTP, home from CLJ) can win
+    # over a same-airport round trip if it's cheaper.
+    outbound_legs: list[Leg] = []
     for origin, destination in product(origin_airports, dest_airports):
-        print(f"Pair: {origin} <-> {destination}")
-        outbound_legs = search_legs(origin, destination, outbound_from, outbound_to, rates)
-        inbound_legs = search_legs(destination, origin, return_from, return_to, rates)
-        all_trips += build_round_trips(outbound_legs, inbound_legs, stay_min, stay_max)
+        print(f"Outbound: {origin} -> {destination}")
+        outbound_legs += search_legs(origin, destination, outbound_from, outbound_to, rates)
+
+    inbound_legs: list[Leg] = []
+    for destination, origin in product(dest_airports, origin_airports):
+        print(f"Return:   {destination} -> {origin}")
+        inbound_legs += search_legs(destination, origin, return_from, return_to, rates)
+
+    all_trips = build_round_trips(outbound_legs, inbound_legs, stay_min, stay_max)
 
     if not all_trips:
         print("\nNo round trips found. Try widening the date windows, the stay interval, "
@@ -303,13 +311,13 @@ def main():
         return f"{leg.price_eur:.0f} EUR{extra}"
 
     print(f"\n{'='*100}\nTOP {TOP_N} CHEAPEST ROUND TRIPS\n{'='*100}")
-    header = f"{'Route':<14}{'Out':<18}{'In':<18}{'Stay':<6}{'Airlines':<20}{'Out Price':<18}{'In Price':<18}{'Total':<10}"
+    header = f"{'Route':<20}{'Out':<18}{'In':<18}{'Stay':<6}{'Airlines':<20}{'Out Price':<18}{'In Price':<18}{'Total':<10}"
     print(header)
     for t in top_trips:
-        route = f"{t.outbound.origin}<->{t.outbound.destination}"
+        route = f"{t.outbound.origin}->{t.outbound.destination} / {t.inbound.origin}->{t.inbound.destination}"
         airlines = f"{t.outbound.airline}/{t.inbound.airline}"
         print(
-            f"{route:<14}"
+            f"{route:<20}"
             f"{t.outbound.departure:%Y-%m-%d %H:%M}  "
             f"{t.inbound.departure:%Y-%m-%d %H:%M}  "
             f"{t.stay_days:<6}"
@@ -322,18 +330,20 @@ def main():
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "origin", "destination", "stay_days",
-            "out_airline", "out_flight_number", "out_departure", "out_price_eur", "out_price_original", "out_currency",
-            "in_airline", "in_flight_number", "in_departure", "in_price_eur", "in_price_original", "in_currency",
+            "stay_days",
+            "out_origin", "out_destination", "out_airline", "out_flight_number", "out_departure",
+            "out_price_eur", "out_price_original", "out_currency",
+            "in_origin", "in_destination", "in_airline", "in_flight_number", "in_departure",
+            "in_price_eur", "in_price_original", "in_currency",
             "total_price_eur",
         ])
         for t in all_trips:
             writer.writerow([
-                t.outbound.origin, t.outbound.destination, t.stay_days,
-                t.outbound.airline, t.outbound.flight_number, t.outbound.departure.isoformat(),
-                f"{t.outbound.price_eur:.2f}", t.outbound.price_original, t.outbound.currency,
-                t.inbound.airline, t.inbound.flight_number, t.inbound.departure.isoformat(),
-                f"{t.inbound.price_eur:.2f}", t.inbound.price_original, t.inbound.currency,
+                t.stay_days,
+                t.outbound.origin, t.outbound.destination, t.outbound.airline, t.outbound.flight_number,
+                t.outbound.departure.isoformat(), f"{t.outbound.price_eur:.2f}", t.outbound.price_original, t.outbound.currency,
+                t.inbound.origin, t.inbound.destination, t.inbound.airline, t.inbound.flight_number,
+                t.inbound.departure.isoformat(), f"{t.inbound.price_eur:.2f}", t.inbound.price_original, t.inbound.currency,
                 f"{t.total_price_eur:.2f}",
             ])
 
