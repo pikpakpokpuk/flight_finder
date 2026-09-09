@@ -89,21 +89,21 @@ if st.session_state.get("origin_airports"):
     if not st.session_state.dest_airports:
         st.warning("No commercial airports found near the destination within this radius.")
 
+    def airport_checklist(label: str, airport_list: list[airports.Airport], key_prefix: str) -> list[airports.Airport]:
+        st.markdown(f"**{label}**")
+        box = st.container(height=250, border=True)
+        chosen = []
+        for a in airport_list:
+            checked = box.checkbox(fmt_airport(a), value=True, key=f"{key_prefix}_{a.iata}")
+            if checked:
+                chosen.append(a)
+        return chosen
+
     c1, c2 = st.columns(2)
     with c1:
-        origin_choices = st.multiselect(
-            "Origin airports",
-            options=st.session_state.origin_airports,
-            default=st.session_state.origin_airports,
-            format_func=fmt_airport,
-        )
+        origin_choices = airport_checklist("Origin airports", st.session_state.origin_airports, "orig")
     with c2:
-        dest_choices = st.multiselect(
-            "Destination airports",
-            options=st.session_state.dest_airports,
-            default=st.session_state.dest_airports,
-            format_func=fmt_airport,
-        )
+        dest_choices = airport_checklist("Destination airports", st.session_state.dest_airports, "dest")
 
     st.subheader("Dates")
     c3, c4 = st.columns(2)
