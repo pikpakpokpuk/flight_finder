@@ -36,7 +36,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 from flyan import RyanAir, FlightSearchParams
+from flyan.misc import Network as RyanairNetwork
 from flywizz import WizzAir, TimetableSearch
+from flywizz.misc import Network as WizzNetwork
 
 import airports
 
@@ -107,20 +109,59 @@ def to_eur(amount: float, currency: str, rates: dict) -> float:
     return amount / rate
 
 
-def get_served_airports() -> set[str]:
+Networks = tuple[Optional[RyanairNetwork], Optional[WizzNetwork]]
+
+
+def fetch_networks() -> Networks:
+    """Fetch Ryanair's and Wizz Air's live route networks once.
+
+    Returns (ryanair_network, wizz_network); either is None if that airline's
+    network couldn't be fetched.
+    """
+    ryanair_net: Optional[RyanairNetwork] = None
+    wizz_net: Optional[WizzNetwork] = None
+    try:
+        ryanair_net = RyanAir().get_network()
+    except Exception as e:
+        print(f"  [warning] couldn't fetch Ryanair's network ({e}); Ryanair routes/airports may be missed")
+    try:
+        wizz_net = WizzAir().get_network()
+    except Exception as e:
+        print(f"  [warning] couldn't fetch Wizz Air's network ({e}); Wizz routes/airports may be missed")
+    return ryanair_net, wizz_net
+
+
+def get_served_airports(networks: Networks) -> set[str]:
     """IATA codes of every airport Ryanair or Wizz Air currently flies to."""
+    ryanair_net, wizz_net = networks
     codes: set[str] = set()
-    try:
-        network = RyanAir().get_network()
-        codes |= {a.iata_code for a in network.airports}
-    except Exception as e:
-        print(f"  [warning] couldn't fetch Ryanair's network ({e}); Ryanair-only airports may be missed")
-    try:
-        network = WizzAir().get_network()
-        codes |= {s.iata for s in network.stations}
-    except Exception as e:
-        print(f"  [warning] couldn't fetch Wizz Air's network ({e}); Wizz-only airports may be missed")
+    if ryanair_net is not None:
+        codes |= {a.iata_code for a in ryanair_net.airports}
+    if wizz_net is not None:
+        codes |= {s.iata for s in wizz_net.stations}
     return codes
+
+
+def build_route_graph(networks: Networks) -> dict[str, set[str]]:
+    """Adjacency map: iata -> set of iata codes with a direct Ryanair/Wizz route.
+
+    Routes are treated as symmetric (X->Y implies Y->X), which holds for
+    almost all Ryanair/Wizz routes.
+    """
+    ryanair_net, wizz_net = networks
+    adj: dict[str, set[str]] = {}
+    if ryanair_net is not None:
+        for a in ryanair_net.airports:
+            adj.setdefault(a.iata_code, set()).update(a.airport_routes())
+    if wizz_net is not None:
+        for s in wizz_net.stations:
+            adj.setdefault(s.iata, set()).update(s.destinations())
+    return adj
+
+
+def find_stopovers(route_graph: dict[str, set[str]], origin: str, destination: str) -> set[str]:
+    """Airports with a direct route from origin AND a direct route to destination."""
+    return route_graph.get(origin, set()) & route_graph.get(destination, set())
 
 
 def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
@@ -285,7 +326,8 @@ def prompt_stay_range() -> tuple[int, int]:
 
 def main():
     print("Fetching Ryanair and Wizz Air's current route networks...")
-    served = get_served_airports()
+    networks = fetch_networks()
+    served = get_served_airports(networks)
 
     start_lat, start_lon = prompt_location("Start location")
     origin_airports = prompt_airport_selection("start", start_lat, start_lon, served)

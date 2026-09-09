@@ -38,8 +38,8 @@ def cached_rates():
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def cached_served_airports():
-    return ff.get_served_airports()
+def cached_networks():
+    return ff.fetch_networks()
 
 
 def fmt_airport(a: airports.Airport) -> str:
@@ -66,7 +66,8 @@ if st.button("Find nearby airports"):
         except Exception as e:
             st.error(str(e))
         else:
-            served = cached_served_airports()
+            networks = cached_networks()
+            served = ff.get_served_airports(networks)
             st.session_state.start_disp = s_disp
             st.session_state.dest_disp = d_disp
             origin_nearby = cached_nearby(s_lat, s_lon, radius_km)
