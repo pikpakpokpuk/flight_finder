@@ -107,6 +107,22 @@ def to_eur(amount: float, currency: str, rates: dict) -> float:
     return amount / rate
 
 
+def get_served_airports() -> set[str]:
+    """IATA codes of every airport Ryanair or Wizz Air currently flies to."""
+    codes: set[str] = set()
+    try:
+        network = RyanAir().get_network()
+        codes |= {a.iata_code for a in network.airports}
+    except Exception as e:
+        print(f"  [warning] couldn't fetch Ryanair's network ({e}); Ryanair-only airports may be missed")
+    try:
+        network = WizzAir().get_network()
+        codes |= {s.iata for s in network.stations}
+    except Exception as e:
+        print(f"  [warning] couldn't fetch Wizz Air's network ({e}); Wizz-only airports may be missed")
+    return codes
+
+
 def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
     client = RyanAir(currency="EUR")
     params = FlightSearchParams(
@@ -204,12 +220,16 @@ def prompt_location(label: str) -> tuple[float, float]:
         return lat, lon
 
 
-def prompt_airport_selection(label: str, lat: float, lon: float) -> list[str]:
+def prompt_airport_selection(label: str, lat: float, lon: float, served: set[str]) -> list[str]:
     found = airports.nearby_airports(lat, lon, NEARBY_RADIUS_KM)
+    if served:
+        found = [a for a in found if a.iata in served]
     if not found:
-        raise SystemExit(f"No commercial airports found within {NEARBY_RADIUS_KM} km of {label}.")
+        raise SystemExit(
+            f"No airport within {NEARBY_RADIUS_KM} km of {label} is served by Ryanair or Wizz Air."
+        )
 
-    print(f"\nAirports within {NEARBY_RADIUS_KM} km of {label}:")
+    print(f"\nRyanair/Wizz Air airports within {NEARBY_RADIUS_KM} km of {label}:")
     for i, a in enumerate(found, 1):
         print(f"  {i:>2}. {a.iata}  {a.name} ({a.municipality}, {a.country}) -- {a.distance_km:.0f} km")
 
@@ -264,11 +284,14 @@ def prompt_stay_range() -> tuple[int, int]:
 
 
 def main():
+    print("Fetching Ryanair and Wizz Air's current route networks...")
+    served = get_served_airports()
+
     start_lat, start_lon = prompt_location("Start location")
-    origin_airports = prompt_airport_selection("start", start_lat, start_lon)
+    origin_airports = prompt_airport_selection("start", start_lat, start_lon, served)
 
     dest_lat, dest_lon = prompt_location("Destination location")
-    dest_airports = prompt_airport_selection("destination", dest_lat, dest_lon)
+    dest_airports = prompt_airport_selection("destination", dest_lat, dest_lon, served)
 
     outbound_from, outbound_to = prompt_date_range("Outbound flight window")
     return_from, return_to = prompt_date_range("Return flight window")

@@ -37,6 +37,11 @@ def cached_rates():
     return ff.get_eur_rates()
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_served_airports():
+    return ff.get_served_airports()
+
+
 def fmt_airport(a: airports.Airport) -> str:
     return f"{a.iata} — {a.name} ({a.distance_km:.0f} km)"
 
@@ -54,17 +59,23 @@ with col2:
 radius_km = st.slider("Search radius for nearby airports (km)", 50, 500, 200, step=10)
 
 if st.button("Find nearby airports"):
-    with st.spinner("Looking up locations..."):
+    with st.spinner("Looking up locations and airline networks..."):
         try:
             s_lat, s_lon, s_disp = cached_geocode(start_place)
             d_lat, d_lon, d_disp = cached_geocode(dest_place)
         except Exception as e:
             st.error(str(e))
         else:
+            served = cached_served_airports()
             st.session_state.start_disp = s_disp
             st.session_state.dest_disp = d_disp
-            st.session_state.origin_airports = cached_nearby(s_lat, s_lon, radius_km)
-            st.session_state.dest_airports = cached_nearby(d_lat, d_lon, radius_km)
+            origin_nearby = cached_nearby(s_lat, s_lon, radius_km)
+            dest_nearby = cached_nearby(d_lat, d_lon, radius_km)
+            if served:
+                origin_nearby = [a for a in origin_nearby if a.iata in served]
+                dest_nearby = [a for a in dest_nearby if a.iata in served]
+            st.session_state.origin_airports = origin_nearby
+            st.session_state.dest_airports = dest_nearby
 
 # ---------------------------------------------------------------------------
 # Step 2: pick airports, dates, run search
