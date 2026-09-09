@@ -57,12 +57,12 @@ MAX_LEG_PRICE_EUR: Optional[float] = 300
 TOP_N = 20
 
 # A search that fails with a transient-looking error (network blip, rate
-# limiting) gets one retry after this pause, instead of silently dropping
-# that leg. Both airlines' own clients already retry transient errors
-# internally before raising, so a failure that reaches us here often means
-# their rate limiting is still cooling down -- worth a longer wait, not an
-# immediate hammer.
-RETRY_DELAY_SECONDS = 3.0
+# limiting) gets retried after a pause, instead of silently dropping that
+# leg. Both airlines' own clients already retry transient errors internally
+# before raising, so a failure that reaches us here often means their rate
+# limiting is still cooling down -- a single short retry isn't always enough
+# to outlast that, so this backs off further on a second attempt.
+RETRY_DELAYS_SECONDS = (3.0, 6.0)
 
 # --- 1-stop (self-connect) search --------------------------------------
 # Ryanair/Wizz don't interline: a "1-stop" here means booking two separate
@@ -292,15 +292,16 @@ def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: 
         to_date=date_to,
     )
     flights = None
-    for attempt in (1, 2):
+    attempts = len(RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
         try:
             flights = client.get_oneways(params)
             break
         except Exception as e:
-            if attempt == 1:
-                time.sleep(RETRY_DELAY_SECONDS)
+            if attempt <= len(RETRY_DELAYS_SECONDS):
+                time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
                 continue
-            print(f"  [Ryanair] {origin} -> {destination}: no results / error after retry ({e})")
+            print(f"  [Ryanair] {origin} -> {destination}: no results / error after {attempts} attempts ({e})")
             return []
     if flights is None:
         return []
@@ -331,7 +332,8 @@ def search_wizzair(origin: str, destination: str, date_from: datetime, date_to: 
         date_to=date_to,
     )
     entries = None
-    for attempt in (1, 2):
+    attempts = len(RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
         try:
             entries = client.get_timetable(params)
             break
@@ -342,10 +344,10 @@ def search_wizzair(origin: str, destination: str, date_from: datetime, date_to: 
             print(f"  [Wizz Air] {origin} -> {destination}: no results / error ({e})")
             return []
         except Exception as e:
-            if attempt == 1:
-                time.sleep(RETRY_DELAY_SECONDS)
+            if attempt <= len(RETRY_DELAYS_SECONDS):
+                time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
                 continue
-            print(f"  [Wizz Air] {origin} -> {destination}: no results / error after retry ({e})")
+            print(f"  [Wizz Air] {origin} -> {destination}: no results / error after {attempts} attempts ({e})")
             return []
     if entries is None:
         return []
