@@ -417,8 +417,20 @@ def build_journeys(
     if not allow_one_stop:
         return journeys
 
+    # Process pairs with the fewest stopover candidates first (a poorly
+    # connected airport like a small regional one might only have 5-6
+    # options total) rather than in whatever order the airport lists came
+    # in. Those resolve almost immediately, so cheap pairs don't sit behind
+    # a slow, well-connected one (e.g. a major hub with 30+ routes) for no
+    # reason -- and if a pair turns out to have zero candidates, that's
+    # known instantly instead of after burning time on unrelated pairs.
+    pairs = []
     for origin, destination in product(origin_codes, dest_codes):
         stopovers = find_stopovers(route_graph, origin, destination) - {origin, destination}
+        pairs.append((origin, destination, stopovers))
+    pairs.sort(key=lambda p: len(p[2]))
+
+    for origin, destination, stopovers in pairs:
         for stop in stopovers:
             msg = f"{label} via {stop}: {origin} -> {stop} -> {destination}"
             print(msg)
