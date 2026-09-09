@@ -18,7 +18,7 @@ import flight_finder as ff
 
 st.set_page_config(page_title="Flight Finder", page_icon="✈️", layout="wide")
 st.title("✈️ Flight Finder")
-st.caption("Round-trip search across every nearby airport, open-jaw included.")
+st.caption("Outbound and return flights found and ranked independently across every nearby airport.")
 
 
 @st.cache_data(show_spinner=False)
@@ -118,8 +118,6 @@ if st.session_state.get("origin_airports"):
             value=(date.today() + timedelta(days=35), date.today() + timedelta(days=65)),
         )
 
-    stay_min, stay_max = st.slider("Length of stay (days)", 1, 30, (5, 8))
-
     c5, c6 = st.columns(2)
     with c5:
         max_price = st.number_input("Max price per leg (EUR, 0 = no limit)", min_value=0, value=300, step=10)
@@ -171,44 +169,46 @@ if st.session_state.get("origin_airports"):
             )
             status.empty()
 
-            trips = ff.build_round_trips(outbound_journeys, inbound_journeys, stay_min, stay_max)
+            outbound_journeys.sort(key=lambda j: j.price_eur)
+            inbound_journeys.sort(key=lambda j: j.price_eur)
 
-            if not trips:
+            if not outbound_journeys and not inbound_journeys:
                 st.warning(
-                    "No round trips found for this combination. Try widening the date windows, "
-                    "the stay range, raising the price cap, or picking more airports."
+                    "No flights found. Try widening the date windows, raising the price cap, "
+                    "or picking more airports."
                 )
-            else:
-                trips.sort(key=lambda t: t.total_price_eur)
-                top_trips = trips[:top_n]
 
-                def leg_detail(l: ff.Leg) -> str:
-                    extra = f" ({l.price_original:.0f} {l.currency})" if l.currency != "EUR" else ""
-                    return f"{l.airline} {l.origin}→{l.destination} {l.departure:%Y-%m-%d %H:%M} {l.price_eur:.0f} EUR{extra}"
+            def leg_detail(l: ff.Leg) -> str:
+                extra = f" ({l.price_original:.0f} {l.currency})" if l.currency != "EUR" else ""
+                return f"{l.airline} {l.origin}→{l.destination} {l.departure:%Y-%m-%d %H:%M} {l.price_eur:.0f} EUR{extra}"
 
-                def trip_row(t: ff.RoundTrip) -> dict:
-                    return {
-                        "Out route": t.outbound.route_str,
-                        "Out date": t.outbound.departure.strftime("%Y-%m-%d %H:%M"),
-                        "Out notes": t.outbound.note,
-                        "Out detail": " | ".join(leg_detail(l) for l in t.outbound.legs),
-                        "Out price (EUR)": round(t.outbound.price_eur),
-                        "In route": t.inbound.route_str,
-                        "In date": t.inbound.departure.strftime("%Y-%m-%d %H:%M"),
-                        "In notes": t.inbound.note,
-                        "In detail": " | ".join(leg_detail(l) for l in t.inbound.legs),
-                        "In price (EUR)": round(t.inbound.price_eur),
-                        "Stay (days)": t.stay_days,
-                        "Total (EUR)": round(t.total_price_eur),
-                    }
+            def journey_row(j: ff.Journey) -> dict:
+                return {
+                    "Route": j.route_str,
+                    "Departure": j.departure.strftime("%Y-%m-%d %H:%M"),
+                    "Notes": j.note,
+                    "Detail": " | ".join(leg_detail(l) for l in j.legs),
+                    "Price (EUR)": round(j.price_eur),
+                }
 
-                st.subheader(f"Top {len(top_trips)} cheapest round trips")
-                st.dataframe(pd.DataFrame(trip_row(t) for t in top_trips), use_container_width=True, hide_index=True)
-
-                full_df = pd.DataFrame(trip_row(t) for t in trips)
+            def show_results(title: str, journeys: list[ff.Journey], file_name: str) -> None:
+                st.subheader(title)
+                if not journeys:
+                    st.write("No flights found for this direction.")
+                    return
+                top = journeys[:top_n]
+                st.dataframe(pd.DataFrame(journey_row(j) for j in top), use_container_width=True, hide_index=True)
+                full_df = pd.DataFrame(journey_row(j) for j in journeys)
                 st.download_button(
-                    f"Download all {len(trips)} results as CSV",
+                    f"Download all {len(journeys)} results as CSV",
                     full_df.to_csv(index=False),
-                    file_name="flight_options.csv",
+                    file_name=file_name,
                     mime="text/csv",
+                    key=file_name,
                 )
+
+            col_out, col_in = st.columns(2)
+            with col_out:
+                show_results(f"Top {min(top_n, len(outbound_journeys))} cheapest outbound flights", outbound_journeys, "outbound_flights.csv")
+            with col_in:
+                show_results(f"Top {min(top_n, len(inbound_journeys))} cheapest return flights", inbound_journeys, "inbound_flights.csv")

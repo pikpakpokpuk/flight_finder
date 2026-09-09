@@ -86,7 +86,8 @@ ESTIMATED_OVERHEAD_HOURS = 0.75
 # direction's own direct-flight search) for a while afterwards.
 ONE_STOP_THROTTLE_SECONDS = 0.4
 
-OUTPUT_CSV = "flight_options.csv"
+OUTBOUND_CSV = "outbound_flights.csv"
+INBOUND_CSV = "inbound_flights.csv"
 
 
 # ============================================================================
@@ -182,20 +183,6 @@ class Journey:
         hours = self.layover.total_seconds() / 3600  # type: ignore[union-attr]
         est = ", est. layover" if self.has_estimated_time else ""
         return f"via {self.stop_codes[0]} ({hours:.1f}h{est})"
-
-
-@dataclass
-class RoundTrip:
-    outbound: Journey
-    inbound: Journey
-
-    @property
-    def total_price_eur(self) -> float:
-        return self.outbound.price_eur + self.inbound.price_eur
-
-    @property
-    def stay_days(self) -> int:
-        return (self.inbound.departure.date() - self.outbound.departure.date()).days
 
 
 def get_eur_rates() -> dict:
@@ -466,15 +453,6 @@ def build_journeys(
     return journeys
 
 
-def build_round_trips(outbound_journeys: list[Journey], inbound_journeys: list[Journey], stay_min: int, stay_max: int) -> list[RoundTrip]:
-    trips = []
-    for out_j, in_j in product(outbound_journeys, inbound_journeys):
-        stay = (in_j.departure.date() - out_j.departure.date()).days
-        if stay_min <= stay <= stay_max:
-            trips.append(RoundTrip(outbound=out_j, inbound=in_j))
-    return trips
-
-
 # ============================================================================
 # Interactive prompts
 # ============================================================================
@@ -539,19 +517,6 @@ def prompt_date_range(label: str) -> tuple[datetime, datetime]:
     return d_from, d_to
 
 
-def prompt_stay_range() -> tuple[int, int]:
-    while True:
-        try:
-            lo = int(input("Minimum length of stay (days): ").strip())
-            hi = int(input("Maximum length of stay (days): ").strip())
-        except ValueError:
-            print("  [error] enter whole numbers, try again.")
-            continue
-        if lo > hi:
-            lo, hi = hi, lo
-        return lo, hi
-
-
 def prompt_yes_no(label: str, default: bool) -> bool:
     hint = "Y/n" if default else "y/N"
     raw = input(f"{label} ({hint}): ").strip().lower()
@@ -563,6 +528,34 @@ def prompt_yes_no(label: str, default: bool) -> bool:
 # ============================================================================
 # Main
 # ============================================================================
+
+
+def leg_detail(leg: Leg) -> str:
+    extra = f" ({leg.price_original:.0f} {leg.currency})" if leg.currency != "EUR" else ""
+    return f"{leg.airline} {leg.origin}->{leg.destination} {leg.departure:%Y-%m-%d %H:%M} {leg.price_eur:.0f} EUR{extra}"
+
+
+def print_journeys(title: str, journeys: list[Journey]) -> None:
+    print(f"\n{'='*100}\n{title}\n{'='*100}")
+    if not journeys:
+        print("(none found)")
+        return
+    header = f"{'Route':<24}{'Departure':<18}{'Price':<12}"
+    print(header)
+    for j in journeys:
+        print(f"{j.route_str:<24}{j.departure:%Y-%m-%d %H:%M}  {j.price_eur:<11.0f}")
+        print(f"    {j.note} -- " + " | ".join(leg_detail(l) for l in j.legs))
+
+
+def write_journeys_csv(path: str, journeys: list[Journey]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["route", "departure", "price_eur", "notes", "detail"])
+        for j in journeys:
+            writer.writerow([
+                j.route_str, j.departure.isoformat(), f"{j.price_eur:.2f}",
+                j.note, " | ".join(leg_detail(l) for l in j.legs),
+            ])
 
 
 def main():
@@ -579,7 +572,6 @@ def main():
 
     outbound_from, outbound_to = prompt_date_range("Outbound flight window")
     return_from, return_to = prompt_date_range("Return flight window")
-    stay_min, stay_max = prompt_stay_range()
     allow_one_stop = prompt_yes_no(
         "Include 1-stop (self-connect) options? Slower -- many more searches", ALLOW_ONE_STOP
     )
@@ -588,14 +580,14 @@ def main():
         f"\nSearching {len(origin_airports)} origin(s) x {len(dest_airports)} destination(s), "
         f"outbound {outbound_from:%Y-%m-%d}-{outbound_to:%Y-%m-%d}, "
         f"return {return_from:%Y-%m-%d}-{return_to:%Y-%m-%d}, "
-        f"stay {stay_min}-{stay_max} days, 1-stop {'on' if allow_one_stop else 'off'}...\n"
+        f"1-stop {'on' if allow_one_stop else 'off'}...\n"
     )
 
     rates = get_eur_rates()
 
-    # Search outbound and inbound independently across every airport combo,
-    # so an open-jaw trip (e.g. fly into OTP, home from CLJ) can win over a
-    # same-airport round trip if it's cheaper.
+    # Outbound and inbound are found and ranked completely independently --
+    # the best outbound flight and the best inbound flight, each on its own
+    # merits, not as a matched pair.
     outbound_journeys = build_journeys(
         origin_airports, dest_airports, outbound_from, outbound_to, rates, route_graph, allow_one_stop, "Outbound"
     )
@@ -603,56 +595,21 @@ def main():
         dest_airports, origin_airports, return_from, return_to, rates, route_graph, allow_one_stop, "Return"
     )
 
-    all_trips = build_round_trips(outbound_journeys, inbound_journeys, stay_min, stay_max)
+    outbound_journeys.sort(key=lambda j: j.price_eur)
+    inbound_journeys.sort(key=lambda j: j.price_eur)
 
-    if not all_trips:
-        print("\nNo round trips found. Try widening the date windows, the stay interval, "
-              "raising MAX_LEG_PRICE_EUR, or picking more airports.")
+    if not outbound_journeys and not inbound_journeys:
+        print("\nNo flights found. Try widening the date windows, raising MAX_LEG_PRICE_EUR, "
+              "or picking more airports.")
         return
 
-    all_trips.sort(key=lambda t: t.total_price_eur)
-    top_trips = all_trips[:TOP_N]
+    print_journeys(f"TOP {TOP_N} CHEAPEST OUTBOUND FLIGHTS", outbound_journeys[:TOP_N])
+    print_journeys(f"TOP {TOP_N} CHEAPEST RETURN FLIGHTS", inbound_journeys[:TOP_N])
 
-    def leg_detail(leg: Leg) -> str:
-        extra = f" ({leg.price_original:.0f} {leg.currency})" if leg.currency != "EUR" else ""
-        return f"{leg.airline} {leg.origin}->{leg.destination} {leg.departure:%Y-%m-%d %H:%M} {leg.price_eur:.0f} EUR{extra}"
-
-    print(f"\n{'='*100}\nTOP {TOP_N} CHEAPEST ROUND TRIPS\n{'='*100}")
-    header = f"{'Route':<24}{'Out':<18}{'In':<18}{'Stay':<6}{'Out Price':<12}{'In Price':<12}{'Total':<10}"
-    print(header)
-    for t in top_trips:
-        route = f"{t.outbound.route_str} / {t.inbound.route_str}"
-        print(
-            f"{route:<24}"
-            f"{t.outbound.departure:%Y-%m-%d %H:%M}  "
-            f"{t.inbound.departure:%Y-%m-%d %H:%M}  "
-            f"{t.stay_days:<6}"
-            f"{t.outbound.price_eur:<11.0f} "
-            f"{t.inbound.price_eur:<11.0f} "
-            f"{t.total_price_eur:.0f} EUR"
-        )
-        print(f"    out: {t.outbound.note} -- " + " | ".join(leg_detail(l) for l in t.outbound.legs))
-        print(f"    in:  {t.inbound.note} -- " + " | ".join(leg_detail(l) for l in t.inbound.legs))
-
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "stay_days",
-            "out_route", "out_departure", "out_price_eur", "out_notes", "out_detail",
-            "in_route", "in_departure", "in_price_eur", "in_notes", "in_detail",
-            "total_price_eur",
-        ])
-        for t in all_trips:
-            writer.writerow([
-                t.stay_days,
-                t.outbound.route_str, t.outbound.departure.isoformat(), f"{t.outbound.price_eur:.2f}",
-                t.outbound.note, " | ".join(leg_detail(l) for l in t.outbound.legs),
-                t.inbound.route_str, t.inbound.departure.isoformat(), f"{t.inbound.price_eur:.2f}",
-                t.inbound.note, " | ".join(leg_detail(l) for l in t.inbound.legs),
-                f"{t.total_price_eur:.2f}",
-            ])
-
-    print(f"\nFull results ({len(all_trips)} round trips) saved to {OUTPUT_CSV}")
+    write_journeys_csv(OUTBOUND_CSV, outbound_journeys)
+    write_journeys_csv(INBOUND_CSV, inbound_journeys)
+    print(f"\nFull results saved to {OUTBOUND_CSV} ({len(outbound_journeys)} flights) "
+          f"and {INBOUND_CSV} ({len(inbound_journeys)} flights)")
 
 
 if __name__ == "__main__":

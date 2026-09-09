@@ -1,4 +1,5 @@
-flight_options.csv
+outbound_flights.csv
+inbound_flights.csv
 airports_cache.csv
 __pycache__/
 *.pyc
