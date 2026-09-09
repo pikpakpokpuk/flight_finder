@@ -9,7 +9,6 @@ USAGE:
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from itertools import product
 
 import pandas as pd
 import streamlit as st
@@ -127,6 +126,17 @@ if st.session_state.get("origin_airports"):
     with c6:
         top_n = st.number_input("Number of results to show", min_value=1, value=20, step=1)
 
+    allow_one_stop = st.checkbox(
+        "Include 1-stop (self-connect) options -- slower, many more searches",
+        value=True,
+        help=(
+            "Books two separate one-way tickets that connect through a third airport. "
+            "Ryanair/Wizz don't interline: no protection if leg 1 is delayed, no baggage "
+            "transfer. Only kept if the layover is 2.5-8h, same calendar day, and the "
+            "total is no more than the cheapest direct flight that day."
+        ),
+    )
+
     search_clicked = st.button("Search flights", type="primary")
 
     if search_clicked:
@@ -144,27 +154,24 @@ if st.session_state.get("origin_airports"):
             dest_codes = [a.iata for a in dest_choices]
 
             rates = cached_rates()
+            route_graph = ff.build_route_graph(cached_networks())
 
-            out_pairs = list(product(origin_codes, dest_codes))
-            in_pairs = list(product(dest_codes, origin_codes))
-            total_steps = len(out_pairs) + len(in_pairs)
+            status = st.empty()
 
-            progress = st.progress(0.0)
-            step = 0
-            outbound_legs: list[ff.Leg] = []
-            for o, d in out_pairs:
-                progress.progress(step / total_steps, text=f"Searching outbound {o} → {d}")
-                outbound_legs += ff.search_legs(o, d, outbound_from, outbound_to, rates)
-                step += 1
+            def report(msg: str) -> None:
+                status.write(msg)
 
-            inbound_legs: list[ff.Leg] = []
-            for d, o in in_pairs:
-                progress.progress(step / total_steps, text=f"Searching return {d} → {o}")
-                inbound_legs += ff.search_legs(d, o, return_from, return_to, rates)
-                step += 1
-            progress.empty()
+            outbound_journeys = ff.build_journeys(
+                origin_codes, dest_codes, outbound_from, outbound_to, rates,
+                route_graph, allow_one_stop, "Outbound", on_step=report,
+            )
+            inbound_journeys = ff.build_journeys(
+                dest_codes, origin_codes, return_from, return_to, rates,
+                route_graph, allow_one_stop, "Return", on_step=report,
+            )
+            status.empty()
 
-            trips = ff.build_round_trips(outbound_legs, inbound_legs, stay_min, stay_max)
+            trips = ff.build_round_trips(outbound_journeys, inbound_journeys, stay_min, stay_max)
 
             if not trips:
                 st.warning(
@@ -175,15 +182,21 @@ if st.session_state.get("origin_airports"):
                 trips.sort(key=lambda t: t.total_price_eur)
                 top_trips = trips[:top_n]
 
+                def leg_detail(l: ff.Leg) -> str:
+                    extra = f" ({l.price_original:.0f} {l.currency})" if l.currency != "EUR" else ""
+                    return f"{l.airline} {l.origin}→{l.destination} {l.departure:%Y-%m-%d %H:%M} {l.price_eur:.0f} EUR{extra}"
+
                 def trip_row(t: ff.RoundTrip) -> dict:
                     return {
-                        "Out route": f"{t.outbound.origin}→{t.outbound.destination}",
+                        "Out route": t.outbound.route_str,
                         "Out date": t.outbound.departure.strftime("%Y-%m-%d %H:%M"),
-                        "Out airline": t.outbound.airline,
+                        "Out notes": t.outbound.note,
+                        "Out detail": " | ".join(leg_detail(l) for l in t.outbound.legs),
                         "Out price (EUR)": round(t.outbound.price_eur),
-                        "In route": f"{t.inbound.origin}→{t.inbound.destination}",
+                        "In route": t.inbound.route_str,
                         "In date": t.inbound.departure.strftime("%Y-%m-%d %H:%M"),
-                        "In airline": t.inbound.airline,
+                        "In notes": t.inbound.note,
+                        "In detail": " | ".join(leg_detail(l) for l in t.inbound.legs),
                         "In price (EUR)": round(t.inbound.price_eur),
                         "Stay (days)": t.stay_days,
                         "Total (EUR)": round(t.total_price_eur),

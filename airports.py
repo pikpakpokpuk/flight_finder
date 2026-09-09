@@ -14,6 +14,7 @@ import csv
 import math
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import requests
 
@@ -59,13 +60,52 @@ def _ensure_airports_csv() -> str:
     return CACHE_PATH
 
 
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp = math.radians(lat2 - lat1)
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
+
+
+_ALL_AIRPORTS_CACHE: Optional[dict[str, Airport]] = None
+
+
+def all_airports() -> dict[str, Airport]:
+    """Every commercial airport with an IATA code, indexed by that code.
+
+    Loaded once from the cached CSV and kept in memory -- used to look up
+    coordinates for an arbitrary IATA code (e.g. a 1-stop candidate), not
+    just airports near a given point.
+    """
+    global _ALL_AIRPORTS_CACHE
+    if _ALL_AIRPORTS_CACHE is not None:
+        return _ALL_AIRPORTS_CACHE
+
+    path = _ensure_airports_csv()
+    index: dict[str, Airport] = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row["type"] not in COMMERCIAL_TYPES:
+                continue
+            iata = row.get("iata_code", "").strip()
+            if not iata:
+                continue
+            try:
+                lat, lon = float(row["latitude_deg"]), float(row["longitude_deg"])
+            except (TypeError, ValueError):
+                continue
+            index[iata] = Airport(
+                iata=iata,
+                name=row["name"],
+                municipality=row.get("municipality", ""),
+                country=row.get("iso_country", ""),
+                lat=lat,
+                lon=lon,
+            )
+    _ALL_AIRPORTS_CACHE = index
+    return index
 
 
 def nearby_airports(lat: float, lon: float, radius_km: float = 300) -> list[Airport]:
@@ -83,7 +123,7 @@ def nearby_airports(lat: float, lon: float, radius_km: float = 300) -> list[Airp
                 a_lat, a_lon = float(row["latitude_deg"]), float(row["longitude_deg"])
             except (TypeError, ValueError):
                 continue
-            dist = _haversine_km(lat, lon, a_lat, a_lon)
+            dist = haversine_km(lat, lon, a_lat, a_lon)
             if dist <= radius_km:
                 found.append(Airport(
                     iata=iata,
