@@ -36,7 +36,7 @@ import requests
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
-from flyan import RyanAir, FlightSearchParams
+from flyan import RyanAir
 from flyan.misc import Network as RyanairNetwork
 from flywizz import BotGateError, ValidationError, WizzAir, TimetableSearch
 from flywizz.misc import Network as WizzNetwork
@@ -283,40 +283,57 @@ def estimate_flight_duration(origin: str, destination: str) -> Optional[timedelt
     return timedelta(hours=distance_km / ESTIMATED_CRUISE_KMH + ESTIMATED_OVERHEAD_HOURS)
 
 
+def _months_in_range(date_from: datetime, date_to: datetime) -> list[datetime]:
+    """First-of-month datetimes covering [date_from, date_to] inclusive."""
+    cur = datetime(date_from.year, date_from.month, 1)
+    last = datetime(date_to.year, date_to.month, 1)
+    out = []
+    while cur <= last:
+        out.append(cur)
+        cur = datetime(cur.year + 1, 1, 1) if cur.month == 12 else datetime(cur.year, cur.month + 1, 1)
+    return out
+
+
 def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: datetime, rates: dict) -> list[Leg]:
+    # NOTE: deliberately NOT using client.get_oneways() (the farfnd
+    # oneWayFares endpoint) here -- for any date range wider than a single
+    # day, it silently returns only the single cheapest fare in the whole
+    # window instead of one fare per day (confirmed by testing: a 30-day
+    # window returned exactly 1 flight). get_cheapest_per_day() is the
+    # correct calendar-style endpoint and returns real per-day fares with
+    # real arrival times.
     client = RyanAir(currency="EUR")
-    params = FlightSearchParams(
-        from_airport=origin,
-        to_airport=destination,
-        from_date=date_from,
-        to_date=date_to,
-    )
-    flights = None
-    attempts = len(RETRY_DELAYS_SECONDS) + 1
-    for attempt in range(1, attempts + 1):
-        try:
-            flights = client.get_oneways(params)
-            break
-        except Exception as e:
-            if attempt <= len(RETRY_DELAYS_SECONDS):
-                time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
-                continue
-            print(f"  [Ryanair] {origin} -> {destination}: no results / error after {attempts} attempts ({e})")
-            return []
-    if flights is None:
-        return []
+
+    all_fares = []
+    for month in _months_in_range(date_from, date_to):
+        fares = None
+        attempts = len(RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                fares = client.get_cheapest_per_day(origin, destination, month)
+                break
+            except Exception as e:
+                if attempt <= len(RETRY_DELAYS_SECONDS):
+                    time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
+                    continue
+                print(f"  [Ryanair] {origin} -> {destination} ({month:%Y-%m}): no results / error after {attempts} attempts ({e})")
+                fares = []
+        all_fares += fares or []
 
     out = []
-    for f in flights:
+    for f in all_fares:
+        if f.sold_out or f.unavailable or f.price is None or f.departure_date is None:
+            continue
+        if not (date_from.date() <= f.departure_date.date() <= date_to.date()):
+            continue
         out.append(Leg(
             airline="Ryanair",
             origin=origin,
             destination=destination,
             departure=f.departure_date,
             price_original=f.price,
-            currency=f.currency,
-            price_eur=to_eur(f.price, f.currency, rates),
-            flight_number=f.flight_number,
+            currency=f.currency or "EUR",
+            price_eur=to_eur(f.price, f.currency or "EUR", rates),
             arrival=f.arrival_date,
             arrival_estimated=False,
         ))
