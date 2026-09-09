@@ -38,7 +38,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from flyan import RyanAir, FlightSearchParams
 from flyan.misc import Network as RyanairNetwork
-from flywizz import WizzAir, TimetableSearch
+from flywizz import BotGateError, ValidationError, WizzAir, TimetableSearch
 from flywizz.misc import Network as WizzNetwork
 
 import airports
@@ -55,6 +55,14 @@ MAX_LEG_PRICE_EUR: Optional[float] = 300
 
 # How many round-trip results to print/save at the end.
 TOP_N = 20
+
+# A search that fails with a transient-looking error (network blip, rate
+# limiting) gets one retry after this pause, instead of silently dropping
+# that leg. Both airlines' own clients already retry transient errors
+# internally before raising, so a failure that reaches us here often means
+# their rate limiting is still cooling down -- worth a longer wait, not an
+# immediate hammer.
+RETRY_DELAY_SECONDS = 3.0
 
 # --- 1-stop (self-connect) search --------------------------------------
 # Ryanair/Wizz don't interline: a "1-stop" here means booking two separate
@@ -283,10 +291,18 @@ def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: 
         from_date=date_from,
         to_date=date_to,
     )
-    try:
-        flights = client.get_oneways(params)
-    except Exception as e:
-        print(f"  [Ryanair] {origin} -> {destination}: no results / error ({e})")
+    flights = None
+    for attempt in (1, 2):
+        try:
+            flights = client.get_oneways(params)
+            break
+        except Exception as e:
+            if attempt == 1:
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            print(f"  [Ryanair] {origin} -> {destination}: no results / error after retry ({e})")
+            return []
+    if flights is None:
         return []
 
     out = []
@@ -314,10 +330,24 @@ def search_wizzair(origin: str, destination: str, date_from: datetime, date_to: 
         date_from=date_from,
         date_to=date_to,
     )
-    try:
-        entries = client.get_timetable(params)
-    except Exception as e:
-        print(f"  [Wizz Air] {origin} -> {destination}: no results / error ({e})")
+    entries = None
+    for attempt in (1, 2):
+        try:
+            entries = client.get_timetable(params)
+            break
+        except (ValidationError, BotGateError) as e:
+            # Permanent: the route isn't sold (ValidationError, e.g.
+            # InvalidMarket) or we're behind the bot gate (BotGateError).
+            # Retrying won't change either.
+            print(f"  [Wizz Air] {origin} -> {destination}: no results / error ({e})")
+            return []
+        except Exception as e:
+            if attempt == 1:
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            print(f"  [Wizz Air] {origin} -> {destination}: no results / error after retry ({e})")
+            return []
+    if entries is None:
         return []
 
     duration = estimate_flight_duration(origin, destination)
