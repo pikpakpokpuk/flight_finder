@@ -1,5 +1,7 @@
 # ✈️ Flight Finder
 
+[![Lint](https://github.com/pikpakpokpuk/flight_finder/actions/workflows/lint.yml/badge.svg)](https://github.com/pikpakpokpuk/flight_finder/actions/workflows/lint.yml)
+
 Multi-airport Ryanair / Wizz Air flight search. Give it a start and
 destination city (not a specific airport), a date window, and it searches
 every commercial airport within range of each, on both airlines, and ranks

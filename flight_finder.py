@@ -6,11 +6,10 @@ Flight Finder: interactive multi-airport one-way / round-trip search
 Asks for your start and destination locations (plain place names),
 finds commercial airports within range of each using OurAirports data,
 lets you pick which ones to consider, then asks for an outbound date
-window, a return date window, and an acceptable length-of-stay range.
-Searches Ryanair (via Flyan) and Wizz Air (via Flywizz) across every
-selected origin/destination airport pair, pairs up outbound and return
-flights that fit the stay-length interval, and prints the top N
-cheapest round trips.
+window and a return date window. Searches Ryanair (via Flyan) and Wizz
+Air (via Flywizz) across every selected origin/destination airport pair
+and prints the top N cheapest outbound flights and the top N cheapest
+return flights, ranked independently of each other.
 
 SETUP (run these once on your own machine):
     pip install Flyan Flywizz requests
@@ -316,7 +315,10 @@ def search_ryanair(origin: str, destination: str, date_from: datetime, date_to: 
                 if attempt <= len(RETRY_DELAYS_SECONDS):
                     time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
                     continue
-                print(f"  [Ryanair] {origin} -> {destination} ({month:%Y-%m}): no results / error after {attempts} attempts ({e})")
+                print(
+                    f"  [Ryanair] {origin} -> {destination} ({month:%Y-%m}): "
+                    f"no results / error after {attempts} attempts ({e})"
+                )
                 fares = []
         all_fares += fares or []
 

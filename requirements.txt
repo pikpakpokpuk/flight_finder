@@ -1,6 +1,6 @@
-Flyan
-Flywizz
-requests
-streamlit
-streamlit-searchbox
-pandas
+Flyan==0.4.4
+Flywizz==0.1.0
+requests==2.34.2
+streamlit==1.63.0
+streamlit-searchbox==0.1.24
+pandas==3.0.5

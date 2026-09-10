@@ -217,6 +217,12 @@ if st.session_state.get("origin_airports"):
 
             col_out, col_in = st.columns(2)
             with col_out:
-                show_results(f"Top {min(top_n, len(outbound_journeys))} cheapest outbound flights", outbound_journeys, "outbound_flights.csv")
+                show_results(
+                    f"Top {min(top_n, len(outbound_journeys))} cheapest outbound flights",
+                    outbound_journeys, "outbound_flights.csv",
+                )
             with col_in:
-                show_results(f"Top {min(top_n, len(inbound_journeys))} cheapest return flights", inbound_journeys, "inbound_flights.csv")
+                show_results(
+                    f"Top {min(top_n, len(inbound_journeys))} cheapest return flights",
+                    inbound_journeys, "inbound_flights.csv",
+                )
