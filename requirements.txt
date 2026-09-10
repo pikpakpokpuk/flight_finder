@@ -2,4 +2,5 @@ Flyan
 Flywizz
 requests
 streamlit
+streamlit-searchbox
 pandas

@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+from streamlit_searchbox import st_searchbox
 
 import airports
 import flight_finder as ff
@@ -21,9 +22,13 @@ st.title("✈️ Flight Finder")
 st.caption("Outbound and return flights found and ranked independently across every nearby airport.")
 
 
-@st.cache_data(show_spinner=False)
-def cached_geocode(place: str):
-    return airports.geocode(place)
+def search_cities(query: str):
+    """search_function for st_searchbox: (label, value) pairs, Europe only."""
+    try:
+        results = airports.geocode_suggestions(query)
+    except Exception:
+        return []
+    return [(display, (lat, lon, display)) for lat, lon, display in results]
 
 
 @st.cache_data(show_spinner=False)
@@ -51,20 +56,23 @@ def fmt_airport(a: airports.Airport) -> str:
 
 col1, col2 = st.columns(2)
 with col1:
-    start_place = st.text_input("Start location", "Copenhagen")
+    start_selection = st_searchbox(
+        search_cities, key="start_searchbox", placeholder="Start location (city, Europe only)"
+    )
 with col2:
-    dest_place = st.text_input("Destination location", "Bucharest")
+    dest_selection = st_searchbox(
+        search_cities, key="dest_searchbox", placeholder="Destination location (city, Europe only)"
+    )
 
 radius_km = st.slider("Search radius for nearby airports (km)", 50, 500, 200, step=10)
 
 if st.button("Find nearby airports"):
-    with st.spinner("Looking up locations and airline networks..."):
-        try:
-            s_lat, s_lon, s_disp = cached_geocode(start_place)
-            d_lat, d_lon, d_disp = cached_geocode(dest_place)
-        except Exception as e:
-            st.error(str(e))
-        else:
+    if not start_selection or not dest_selection:
+        st.error("Pick a start and a destination city from the suggestions first.")
+    else:
+        with st.spinner("Looking up locations and airline networks..."):
+            s_lat, s_lon, s_disp = start_selection
+            d_lat, d_lon, d_disp = dest_selection
             networks = cached_networks()
             served = ff.get_served_airports(networks)
             st.session_state.start_disp = s_disp

@@ -26,6 +26,18 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 # Only these count as "commercial enough to bother with".
 COMMERCIAL_TYPES = {"large_airport", "medium_airport"}
 
+# ISO 3166-1 alpha-2 codes for Europe (incl. Ryanair/Wizz's odd non-EU
+# outliers like Morocco/Israel/Jordan are deliberately NOT here -- this set
+# is only used to keep city-search suggestions to Europe, not to filter
+# airports/routes).
+EUROPE_COUNTRY_CODES = {
+    "AL", "AD", "AT", "BY", "BE", "BA", "BG", "HR", "CY", "CZ", "DK", "EE",
+    "FO", "FI", "FR", "DE", "GI", "GR", "GG", "VA", "HU", "IS", "IE", "IM",
+    "IT", "JE", "XK", "LV", "LI", "LT", "LU", "MT", "MD", "MC", "ME", "NL",
+    "MK", "NO", "PL", "PT", "RO", "RU", "SM", "RS", "SK", "SI", "ES", "SJ",
+    "SE", "CH", "UA", "GB", "AX",
+}
+
 
 @dataclass(frozen=True)
 class Airport:
@@ -48,6 +60,25 @@ def geocode(place: str) -> tuple[float, float, str]:
     r = results[0]
     display = ", ".join(x for x in [r.get("name"), r.get("admin1"), r.get("country")] if x)
     return r["latitude"], r["longitude"], display
+
+
+def geocode_suggestions(query: str, count: int = 8) -> list[tuple[float, float, str]]:
+    """Live-search city suggestions for autocomplete, restricted to Europe.
+
+    Returns a list of (lat, lon, display_name), best match first.
+    """
+    if not query or len(query) < 2:
+        return []
+    resp = requests.get(GEOCODE_URL, params={"name": query, "count": count, "language": "en"}, timeout=10)
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    out = []
+    for r in results:
+        if r.get("country_code") not in EUROPE_COUNTRY_CODES:
+            continue
+        display = ", ".join(x for x in [r.get("name"), r.get("admin1"), r.get("country")] if x)
+        out.append((r["latitude"], r["longitude"], display))
+    return out
 
 
 def _ensure_airports_csv() -> str:
